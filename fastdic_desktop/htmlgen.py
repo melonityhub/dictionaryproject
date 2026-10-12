@@ -171,15 +171,9 @@ def translator_block(source: str, result: Optional[str], error: Optional[str], d
     """بخش «ترجمه در مترجم» (generateEnglishMeaningForOrder با translateModel)."""
     if error:
         return '<h2 class="rtl">ترجمه</h2><p class="rtl err">%s</p>' % e(error)
-    try:
-        src, tgt = direction.split('>')
-        from .mlkit_models import language_name
-        label = '%s → %s' % (language_name(src), language_name(tgt))
-    except Exception:
-        label = direction.replace('>', ' → ') or 'ذخیره‌شده'
-    dst_rtl = direction.split('>')[-1] in ('fa', 'ar', 'ur', 'iw')      # زبان‌های راست‌به‌چپ
+    dst_rtl = direction.endswith('fa')
     return ('<a name="translate"></a><h2 class="rtl">ترجمه در مترجم <span class="tag">(آفلاین، %s)</span></h2>'
-            '<div class="box %s">%s</div>' % (label, 'rtl' if dst_rtl else 'ltr',
+            '<div class="box %s">%s</div>' % (direction.replace('>', ' → ') or 'ذخیره‌شده', 'rtl' if dst_rtl else 'ltr',
                                                e(result or '').replace('\n', '<br>')))
 
 

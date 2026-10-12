@@ -1,178 +1,274 @@
 # -*- coding: utf-8 -*-
-"""In-app model download and installation dialog."""
-from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout,
-                               QLabel, QLineEdit, QMessageBox, QProgressBar,
-                               QPushButton, QVBoxLayout)
+"""پنجرهٔ «مدل‌های ترجمهٔ آفلاین» — انتخاب زبان مقصد از فهرست، دانلود از سرورهای خود
+ML Kit (dl.google.com) با نمایش پیشرفت و حجم DL_SZ، وضعیت «آمادهٔ آفلاین»، دکمهٔ حذف
+و استفادهٔ بدون اینترنت از کش محلی در اجراهای بعدی."""
+import threading
 
-from .model_download import DIRECTIONS, install_model_from_url
-from .translator import discover_packages
+from PySide6.QtCore import QSize, QThread, Signal, Qt
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel,
+                               QMessageBox, QProgressBar, QPushButton, QStackedWidget,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+
+from .mlkit_models import (DownloadCancelled, ModelDownloadError, download_package, format_bytes,
+                           known_languages, language_name, language_native, model_urls,
+                           pair_for, remove_language)
+
+# صفحات ستون «عملیات»
+PAGE_DOWNLOAD, PAGE_PROGRESS, PAGE_DELETE = 0, 1, 2
+
+STATUS_READY = '✔ آمادهٔ آفلاین'
+STATUS_PARTIAL = 'نصب ناقص'
+STATUS_NONE = 'دانلود نشده'
+STATUS_DOWNLOADING = 'در حال دانلود…'
 
 
-class ModelDownloadWorker(QThread):
-    progress = Signal(int, int)
-    installed = Signal(str)
-    failed = Signal(str)
+class DownloadWorker(QThread):
+    """دانلود یک بستهٔ زبان در پس‌زمینه (مثل ModelManager.download در ML Kit)."""
+    progress = Signal(str, int, int)          # lang, received, total
+    installed = Signal(str, str)              # lang, path
+    failed = Signal(str, str)                 # lang, error
+    cancelled = Signal(str)                   # lang
 
-    def __init__(self, url: str, direction: str, models_root: str, parent=None):
+    def __init__(self, lang: str, models_root: str, parent=None):
         super().__init__(parent)
-        self.url = url
-        self.direction = direction
+        self.lang = lang
         self.models_root = models_root
+        self.cancel_event = threading.Event()
+
+    def cancel(self):
+        self.cancel_event.set()
 
     def run(self):
+        lang = self.lang
         try:
-            path = install_model_from_url(self.url, self.direction, self.models_root,
-                                          progress=self.progress.emit)
-            self.installed.emit(path)
-        except Exception as exc:  # surfaced in the dialog
-            self.failed.emit(str(exc))
+            path = download_package(
+                lang, self.models_root,
+                progress=lambda done, total: self.progress.emit(lang, done, total),
+                cancel=self.cancel_event.is_set)
+            self.installed.emit(lang, path)
+        except DownloadCancelled:
+            self.cancelled.emit(lang)
+        except Exception as exc:  # noqa — در پنجره نمایش داده می‌شود
+            self.failed.emit(lang, str(exc))
 
 
 class ModelManagerDialog(QDialog):
-    """Collect a compatible ZIP source and install either translation direction."""
+    """فهرست زبان‌های ML Kit با وضعیت، حجم DL_SZ، دانلود/لغو و حذف."""
 
     def __init__(self, settings, models_root: str, parent=None, on_models_changed=None):
         super().__init__(parent)
-        self.setWindowTitle('دانلود مدل‌های ترجمه')
-        self.resize(760, 500)
+        self.setWindowTitle('مدل‌های ترجمهٔ آفلاین (ML Kit)')
+        self.resize(820, 600)
         self.settings = settings
         self.models_root = models_root
         self.on_models_changed = on_models_changed
-        self._workers = {}
-        self._fields = {}
-        self._statuses = {}
-        self._progress = {}
-        self._buttons = {}
+        self._worker: DownloadWorker = None
+        self._rows = {}                    # lang → dict(tree_item, stack, buttons, progress, status_item)
+        self._prev_page = {}
 
         layout = QVBoxLayout(self)
         intro = QLabel(
-            'برای هر جهت، نشانی مستقیم HTTPS فایل ZIP سازگار را وارد کنید. '
-            'بسته باید translation_model.pb، فایل‌های BIPE و واژگان مدل را داشته باشد. '
-            'پس از نصب، ترجمه بدون اینترنت انجام می‌شود؛ فقط دریافت مدل به اینترنت نیاز دارد.'
-        )
+            'زبان مقصد را از فهرست انتخاب کنید؛ مدل همان زبان از همان سرورهای خود ML Kit '
+            '(همان مدل‌های آفلاین Google Translate) دانلود و با بررسی SHA-256 نصب می‌شود.\n'
+            'هر بسته هر دو جهت (انگلیسی ⇄ زبان) را دارد. پس از نصب، ترجمه همیشه آفلاین از کش '
+            'محلی انجام می‌شود و فقط دریافت اولیه اینترنت می‌خواهد.')
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        for direction in ('fa>en', 'en>fa'):
-            info = DIRECTIONS[direction]
-            group = QGroupBox(info['label'])
-            group_layout = QVBoxLayout(group)
-            status = QLabel()
-            status.setWordWrap(True)
-            group_layout.addWidget(status)
+        self.source_note = QLabel()
+        self.source_note.setWordWrap(True)
+        self.source_note.setStyleSheet('color: gray;')
+        layout.addWidget(self.source_note)
 
-            source = QLineEdit(str(settings.get(info['setting'], '') or ''))
-            source.setPlaceholderText('https://…/translation-model.zip')
-            source.setClearButtonEnabled(True)
-            group_layout.addWidget(source)
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels(['زبان', 'وضعیت', 'حجم دانلود (DL_SZ)'])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setSelectionMode(QTreeWidget.NoSelection)
+        header = self.tree.header()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        layout.addWidget(self.tree, 1)
 
-            controls = QHBoxLayout()
-            progress = QProgressBar()
-            progress.setRange(0, 100)
-            progress.setValue(0)
-            progress.setFormat('%p%')
-            button = QPushButton('دانلود و نصب')
-            controls.addWidget(progress, 1)
-            controls.addWidget(button)
-            group_layout.addLayout(controls)
-            layout.addWidget(group)
-
-            self._fields[direction] = source
-            self._statuses[direction] = status
-            self._progress[direction] = progress
-            self._buttons[direction] = button
-            button.clicked.connect(lambda _=False, selected=direction: self._start_download(selected))
-
-        self.model_note = QLabel('محل ذخیره: ' + models_root)
-        self.model_note.setWordWrap(True)
-        layout.addWidget(self.model_note)
+        self.storage_note = QLabel('محل ذخیره (کش محلی): ' + models_root)
+        self.storage_note.setWordWrap(True)
+        layout.addWidget(self.storage_note)
 
         self._button_box = QDialogButtonBox(QDialogButtonBox.Close)
         self._button_box.rejected.connect(self.close)
         layout.addWidget(self._button_box)
+
+        self._populate()
         self._refresh_status()
 
+    # ------------------------------------------------------------ ساخت ردیف‌ها
+    def _populate(self):
+        sample_urls = model_urls(pair_for('fa'))
+        self.source_note.setText('منبع دانلود (مثل ML Kit): ' + sample_urls[0])
+        for lang in known_languages():
+            item = QTreeWidgetItem()
+            name = language_name(lang)
+            item.setText(0, '%s (%s)' % (name, lang))
+            item.setToolTip(0, language_native(lang))
+            item.setTextAlignment(0, Qt.AlignRight | Qt.AlignVCenter)
+            item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+            self.tree.addTopLevelItem(item)
+
+            page_wrap = QWidget()
+            row = QHBoxLayout(page_wrap)
+            row.setContentsMargins(2, 0, 2, 0)
+            stack = QStackedWidget(page_wrap)
+            row.addWidget(stack)
+
+            btn_download = QPushButton('دانلود')
+            btn_download.setMinimumWidth(84)
+            btn_download.clicked.connect(lambda _=False, l=lang: self._start_download(l))
+            stack.addWidget(btn_download)
+
+            progress_page = QWidget()
+            pbar = QProgressBar()
+            pbar.setRange(0, 100)
+            pbar.setValue(0)
+            pbar.setFormat('%p%')
+            btn_cancel = QPushButton('لغو')
+            btn_cancel.setFixedWidth(48)
+            btn_cancel.clicked.connect(self._cancel_download)
+            inner = QHBoxLayout(progress_page)
+            inner.setContentsMargins(0, 0, 0, 0)
+            inner.addWidget(pbar, 1)
+            inner.addWidget(btn_cancel)
+            stack.addWidget(progress_page)
+
+            btn_delete = QPushButton('حذف')
+            btn_delete.setMinimumWidth(84)
+            btn_delete.clicked.connect(lambda _=False, l=lang: self._delete(l))
+            stack.addWidget(btn_delete)
+
+            self.tree.setItemWidget(item, 2, page_wrap)
+            item.setSizeHint(2, QSize(190, 36))
+            self._rows[lang] = {'item': item, 'stack': stack, 'download': btn_download,
+                                'progress': pbar, 'delete': btn_delete}
+
+    # ------------------------------------------------------------ وضعیت‌ها
     def _refresh_status(self):
-        installed = discover_packages(self.models_root)
-        for direction in ('fa>en', 'en>fa'):
-            if direction in installed:
-                self._statuses[direction].setText('وضعیت: نصب شده و قابل‌شناسایی')
+        from .mlkit_models import language_status
+        status = language_status(self.models_root)
+        installed = 0
+        for lang, row in self._rows.items():
+            rec = status.get(lang, {})
+            if rec.get('ready'):
+                row['item'].setText(1, STATUS_READY)
+                installed += 1
+            elif rec.get('partial'):
+                dirs = '، '.join(sorted(rec['directions']))
+                row['item'].setText(1, '%s (%s)' % (STATUS_PARTIAL, dirs))
             else:
-                self._statuses[direction].setText('وضعیت: هنوز نصب نشده')
+                row['item'].setText(1, STATUS_NONE)
+            row['item'].setText(2, format_bytes(rec.get('DL_SZ', 0)))
+            row['item'].setToolTip(
+                2, 'حجم بازشده: %s  |  ریویژن: r%d  |  SHA-256: %s…'
+                   % (format_bytes(rec.get('SZ', 0)), rec.get('RV', 0), rec.get('HASH', '')[:16]))
+            if self._worker is None or self._worker.lang != lang:
+                self._show_page(lang, PAGE_DELETE if rec.get('ready') or rec.get('partial') else PAGE_DOWNLOAD)
+        self.setWindowTitle('مدل‌های ترجمهٔ آفلاین (ML Kit) — %d زبان آماده' % installed)
+        self._update_close_button()
 
-    def _start_download(self, direction: str):
-        if direction in self._workers:
+    def _show_page(self, lang: str, page: int):
+        row = self._rows[lang]
+        row['stack'].setCurrentIndex(page)
+
+    def _update_close_button(self):
+        busy = self._worker is not None
+        self._button_box.button(QDialogButtonBox.Close).setEnabled(not busy)
+
+    # ------------------------------------------------------------ دانلود
+    def _start_download(self, lang: str):
+        if self._worker is not None:
             return
-        url = self._fields[direction].text().strip()
-        if not url:
-            QMessageBox.warning(self, 'نشانی مدل وارد نشده',
-                                'برای %s، نشانی مستقیم HTTPS فایل ZIP را وارد کنید.' % DIRECTIONS[direction]['label'])
-            self._fields[direction].setFocus()
-            return
-
-        self.settings.set(DIRECTIONS[direction]['setting'], url)
-        self._buttons[direction].setEnabled(False)
-        self._progress[direction].setRange(0, 0)
-        self._progress[direction].setFormat('در حال دانلود…')
-        self._statuses[direction].setText('در حال دریافت و بررسی بسته…')
-        self._button_box.button(QDialogButtonBox.Close).setEnabled(False)
-
-        worker = ModelDownloadWorker(url, direction, self.models_root, self)
-        self._workers[direction] = worker
-        worker.progress.connect(lambda current, total, d=direction: self._update_progress(d, current, total))
-        worker.installed.connect(lambda path, d=direction: self._download_succeeded(d, path))
-        worker.failed.connect(lambda error, d=direction: self._download_failed(d, error))
-        worker.finished.connect(lambda d=direction: self._worker_finished(d))
-        worker.start()
-
-    def _update_progress(self, direction: str, current: int, total: int):
-        bar = self._progress[direction]
-        if total <= 0:
-            bar.setRange(0, 0)
-            return
+        for l, row in self._rows.items():
+            row['download'].setEnabled(False)
+            row['delete'].setEnabled(False)
+        bar = self._rows[lang]['progress']
         bar.setRange(0, 100)
-        bar.setValue(min(100, int(current * 100 / total)))
-        bar.setFormat(f'%p%  ({self._format_bytes(current)} / {self._format_bytes(total)})')
+        bar.setValue(0)
+        bar.setFormat('در حال دانلود…')
+        self._rows[lang]['item'].setText(1, STATUS_DOWNLOADING)
+        self._show_page(lang, PAGE_PROGRESS)
 
-    @staticmethod
-    def _format_bytes(size: int) -> str:
-        value = float(size)
-        for unit in ('B', 'KB', 'MB', 'GB'):
-            if value < 1024 or unit == 'GB':
-                return '%.1f %s' % (value, unit)
-            value /= 1024
-        return '%.1f GB' % value
+        self._worker = DownloadWorker(lang, self.models_root, self)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.installed.connect(self._on_installed)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.cancelled.connect(self._on_cancelled)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.start()
+        self._update_close_button()
 
-    def _download_succeeded(self, direction: str, path: str):
-        self._progress[direction].setRange(0, 100)
-        self._progress[direction].setValue(100)
-        self._progress[direction].setFormat('نصب شد')
-        self._statuses[direction].setText('آماده: ' + path)
+    def _cancel_download(self):
+        if self._worker is not None:
+            self._worker.cancel()
+
+    def _on_progress(self, lang: str, received: int, total: int):
+        row = self._rows[lang]
+        bar = row['progress']
+        if total > 0:
+            bar.setRange(0, 100)
+            bar.setValue(min(100, int(received * 100 / total)))
+            bar.setFormat('%p%  (%s / %s)' % (format_bytes(received), format_bytes(total)))
+        else:
+            bar.setRange(0, 0)
+        row['item'].setText(1, STATUS_DOWNLOADING)
+
+    def _on_installed(self, lang: str, path: str):
         self._refresh_status()
         if self.on_models_changed:
             self.on_models_changed()
-        QMessageBox.information(self, 'مدل نصب شد',
-                                'مدل %s نصب شد و برای ترجمه‌ی آفلاین آماده است.' % DIRECTIONS[direction]['label'])
+        QMessageBox.information(
+            self, 'مدل آماده شد',
+            'مدل «%s» دانلود و نصب شد و برای ترجمهٔ آفلاین آماده است.\n%s' % (language_name(lang), path))
 
-    def _download_failed(self, direction: str, error: str):
-        self._progress[direction].setRange(0, 100)
-        self._progress[direction].setValue(0)
-        self._progress[direction].setFormat('ناموفق')
-        self._statuses[direction].setText('دانلود یا بررسی مدل ناموفق بود.')
-        QMessageBox.critical(self, 'نصب مدل ناموفق بود', error)
+    def _on_failed(self, lang: str, error: str):
+        self._refresh_status()
+        QMessageBox.critical(self, 'دانلود مدل ناموفق بود',
+                             'دریافت «%s» ناموفق بود:\n%s' % (language_name(lang), error))
 
-    def _worker_finished(self, direction: str):
-        worker = self._workers.pop(direction, None)
+    def _on_cancelled(self, lang: str):
+        self._refresh_status()
+
+    def _on_finished(self):
+        worker, self._worker = self._worker, None
         if worker is not None:
             worker.deleteLater()
-        self._buttons[direction].setEnabled(True)
-        self._button_box.button(QDialogButtonBox.Close).setEnabled(not self._workers)
+        for row in self._rows.values():
+            row['download'].setEnabled(True)
+            row['delete'].setEnabled(True)
+        self._refresh_status()
+
+    # ------------------------------------------------------------ حذف
+    def _delete(self, lang: str):
+        if self._worker is not None:
+            return
+        name = language_name(lang)
+        if QMessageBox.question(
+                self, 'حذف مدل',
+                'مدل «%s» از کش محلی حذف شود؟ (برای استفادهٔ دوباره باید دوباره دانلود شود.)' % name,
+                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        try:
+            remove_language(lang, self.models_root)
+        except ModelDownloadError as exc:
+            QMessageBox.critical(self, 'حذف مدل ناموفق بود', str(exc))
+            return
+        self._refresh_status()
+        if self.on_models_changed:
+            self.on_models_changed()
 
     def closeEvent(self, event):
-        if self._workers:
+        if self._worker is not None:
             event.ignore()
             QMessageBox.information(self, 'دانلود در حال انجام است',
-                                    'برای جلوگیری از ناقص‌شدن مدل، تا پایان دانلود صبر کنید.')
+                                    'برای بستن، اول دانلود را «لغو» کنید.')
             return
         super().closeEvent(event)

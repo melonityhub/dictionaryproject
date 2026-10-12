@@ -10,7 +10,7 @@ import urllib.parse
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl, QObject
 from PySide6.QtGui import QFont, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
                                QPushButton, QSpinBox, QSplitter, QTabBar, QTextBrowser, QVBoxLayout, QWidget)
 
@@ -18,8 +18,6 @@ from . import htmlgen
 from .db import FDDatabase, category_of, lang_of, trim_lower, is_english, CAT_ENGLISH, CAT_PERSIAN
 from .numwords import en_words, fa_words, is_integer_text, to_int
 from .translator import OfflineTranslatorService, MAX_TRANSLATOR_WORDS
-from .mlkit_models import (format_bytes, installed_languages, known_languages, language_name,
-                           package_info)
 from .modelmanager import ModelManagerDialog
 from .userdata import Settings, UserData, default_models_dir
 
@@ -32,13 +30,13 @@ except Exception:           # noqa
 class TranslateWorker(QThread):
     done = Signal(object, object, str, str)       # result, error, direction, source
 
-    def __init__(self, svc, text, target='fa'):
+    def __init__(self, svc, text):
         super().__init__()
-        self.svc, self.text, self.target = svc, text, target
+        self.svc, self.text = svc, text
 
     def run(self):
         try:
-            r, err, d = self.svc.translate(self.text, target=self.target)
+            r, err, d = self.svc.translate(self.text)
             self.done.emit(r, err, d, self.text)
         except Exception as ex:   # noqa
             traceback.print_exc()
@@ -57,7 +55,7 @@ class SettingsDialog(QDialog):
             b = QPushButton('انتخاب…')
             b.clicked.connect(lambda _=False, e=edit, d=is_dir: self._pick(e, d))
             row = QHBoxLayout(); row.addWidget(edit); row.addWidget(b)
-            f.addRow('پوشه‌ی مدل‌های ترجمه (بسته‌های ML Kit مثل en_fa):' if is_dir
+            f.addRow('پوشه‌ی بسته‌های ترجمه (شامل translate_faen / translate_enfa):' if is_dir
                      else 'فایل دیتابیس (fastdic_plain.sqlite):', row)
         self.beam = QSpinBox(); self.beam.setRange(1, 8); self.beam.setValue(int(st.get('beam', 4)))
         f.addRow('اندازه‌ی beam search (۱ تا ۸):', self.beam)
@@ -116,17 +114,9 @@ class MainWindow(QMainWindow):
         self.tr_box = QWidget(); tv = QVBoxLayout(self.tr_box); tv.setContentsMargins(0, 0, 0, 0)
         self.tr_in = QPlainTextEdit(); self.tr_in.setPlaceholderText('متن را این‌جا بنویسید (حداکثر %d واژه)…' % MAX_TRANSLATOR_WORDS)
         self.tr_btn = QPushButton('ترجمه (Ctrl+Enter)')
-        self.models_btn = QPushButton('مدل‌ها…')
-        tr_actions = QHBoxLayout()
-        tr_actions.addWidget(QLabel('زبان مقصد:'))
-        self.tr_lang = QComboBox(); self.tr_lang.setMinimumWidth(150)
-        for code in known_languages():
-            self.tr_lang.addItem('%s%s — %s' % ('✔ ' if code == 'fa' else '', language_name(code), code), code)
-        tr_actions.addWidget(self.tr_lang, 1)
-        tr_actions.addWidget(self.tr_btn); tr_actions.addWidget(self.models_btn)
-        self.tr_hint = QLabel(''); self.tr_hint.setWordWrap(True); self.tr_hint.setStyleSheet('color: gray;')
-        tv.addWidget(self.tr_in, 1); tv.addLayout(tr_actions); tv.addWidget(self.tr_hint)
-        lv.addWidget(self.tr_box, 1); self.tr_box.hide()
+        self.models_btn = QPushButton('دانلود/مدیریت مدل‌ها')
+        tr_actions = QHBoxLayout(); tr_actions.addWidget(self.tr_btn); tr_actions.addWidget(self.models_btn)
+        tv.addWidget(self.tr_in, 1); tv.addLayout(tr_actions); lv.addWidget(self.tr_box, 1); self.tr_box.hide()
         split.addWidget(left)
         self.view = QTextBrowser(); self.view.setOpenLinks(False); self.view.setOpenExternalLinks(False)
         split.addWidget(self.view)
@@ -146,7 +136,6 @@ class MainWindow(QMainWindow):
         self.btn_fav.clicked.connect(self.toggle_fav)
         self.tr_btn.clicked.connect(self.translate_box)
         self.models_btn.clicked.connect(self.manage_models)
-        self.tr_lang.currentIndexChanged.connect(self._on_target_changed)
         QShortcut(QKeySequence('Ctrl+Return'), self, activated=self.translate_box)
         QShortcut(QKeySequence('Ctrl+L'), self, activated=lambda: (self.search.setFocus(), self.search.selectAll()))
 
@@ -169,52 +158,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 self.db = None
         mroot = self.st.get('models_dir', '') or default_models_dir()
-        self.models_root = mroot
         self.svc = OfflineTranslatorService(mroot, beam=int(self.st.get('beam', 4))) if os.path.isdir(mroot) else None
-        self._sync_translator_ui()
-
-    def _sync_translator_ui(self):
-        """فهرست زبان مقصد (تیکِ آماده‌ها)، زبان ذخیره‌شده و نوار وضعیت را تازه می‌کند."""
-        ready = installed_languages(self.models_root) if self.svc else []
-        names = {c: language_name(c) for c in known_languages()}
-        self.tr_lang.blockSignals(True)
-        current = self.st.get('translate_target', 'fa') or 'fa'
-        for i in range(self.tr_lang.count()):
-            code = self.tr_lang.itemData(i)
-            self.tr_lang.setItemText(i, '%s%s — %s' % ('✔ ' if code in ready else '', names[code], code))
-            if code == current:
-                self.tr_lang.setCurrentIndex(i)
-        self.tr_lang.blockSignals(False)
-        self._update_tr_hint()
-        self.load_resources_status_only()
-
-    def _current_target(self) -> str:
-        return self.tr_lang.currentData() or 'fa'
-
-    def _on_target_changed(self, _index=-1):
-        self.st.set('translate_target', self._current_target())
-        self._update_tr_hint()
-
-    def _update_tr_hint(self):
-        target = self._current_target()
-        info = package_info(lang=target)
-        if self.svc:
-            direction = self.svc.direction_for('Hello', target)
-            if direction in self.svc.packages:
-                self.tr_hint.setText('✔ آمادهٔ آفلاین — متن انگلیسی ⇄ %s (حجم بازشده: %s).'
-                                     % (language_name(target), format_bytes(info['SZ'])))
-                return
-        self.tr_hint.setText('مدل «%s» نصب نیست — حجم دانلود (DL_SZ): %s. با «مدل‌ها…» دانلودش کنید؛ '
-                             'پس از یک بار دانلود، ترجمه همیشه آفلاین است.' % (language_name(target), format_bytes(info['DL_SZ'])))
-
-    def load_resources_status_only(self):
-        ready = installed_languages(self.models_root) if self.svc else []
-        msg_db = 'دیتابیس: ' + ('آماده' if self.db else 'انتخاب نشده')
-        if ready:
-            msg_tr = 'مترجم: ' + '، '.join(language_name(c) for c in ready) + ' (آمادهٔ آفلاین)'
-        else:
-            msg_tr = 'مترجم: مدلی نصب نشده'
-        self.status.setText('   |   '.join([msg_db, msg_tr]))
+        msg = []
+        msg.append('دیتابیس: ' + ('آماده' if self.db else 'انتخاب نشده'))
+        msg.append('مترجم: ' + (', '.join(x.replace('>', '→') for x in self.svc.available()) if self.svc and self.svc.available() else 'بسته‌ای پیدا نشد'))
+        self.status.setText('   |   '.join(msg))
 
     def open_settings(self):
         dlg = SettingsDialog(self.st, self)
@@ -232,9 +180,9 @@ class MainWindow(QMainWindow):
         if not self.db:
             body = htmlgen.not_found('فایل دیتابیس را از «⚙ تنظیمات» انتخاب کنید.', 'خوش آمدید')
         elif not self.svc or not self.svc.available():
-            body = htmlgen.not_found('برای ترجمه، در بخش «مترجم متن» زبان مقصد را انتخاب و با دکمه‌ی «مدل‌ها…» همان مدل را دانلود کنید؛ مدل‌ها همان بسته‌های آفلاین ML Kit / Google Translate هستند.', 'مدلی نصب نشده')
+            body = htmlgen.not_found('برای ترجمه، از بخش «مترجم متن» دکمه‌ی «دانلود/مدیریت مدل‌ها» را بزنید و مدل فارسی↔انگلیسی را نصب کنید.', 'مدلی نصب نشده')
         else:
-            body = htmlgen.not_found('یک لغت را جستجو کنید، یا در تب «مترجم متن» زبان مقصد را انتخاب و متن را ترجمه کنید (آفلاین).', 'آماده است')
+            body = htmlgen.not_found('یک لغت را جستجو کنید، یا روی ردیف «ترجمه» بزنید تا متن با مدل آفلاین ترجمه شود.', 'آماده است')
         self.view.setHtml(htmlgen.wrap(body, self.dark))
 
     # ----------------------------------------------------------------- فهرست پیشنهادها
@@ -338,12 +286,12 @@ class MainWindow(QMainWindow):
         if not text:
             return
         if not self.svc or not self.svc.available():
-            self.view.setHtml(htmlgen.wrap(htmlgen.translator_block(text, None, 'پوشه‌ی مدل‌ها از تنظیمات انتخاب نشده یا مدلی در آن نیست. از «مدل‌ها…» دانلود کنید.', ''), self.dark)); return
+            self.view.setHtml(htmlgen.wrap(htmlgen.translator_block(text, None, 'پوشه‌ی بسته‌های ترجمه از تنظیمات انتخاب نشده یا بسته‌ای در آن نیست.', ''), self.dark)); return
         if len(text.split()) > MAX_TRANSLATOR_WORDS:                      # ConfigConstKt.MAX_TRANSLATOR_WORDS
             QMessageBox.warning(self, 'متن طولانی است', 'حداکثر %d واژه مجاز است.' % MAX_TRANSLATOR_WORDS); return
         self.status.setText('در حال ترجمه…')
         self.view.setHtml(htmlgen.wrap('<p class="rtl">⏳ در حال ترجمه…</p>', self.dark))
-        self._worker = TranslateWorker(self.svc, text, target=self._current_target())
+        self._worker = TranslateWorker(self.svc, text)
         self._worker.done.connect(self.on_translated)
         self._worker.start()
 
@@ -360,6 +308,10 @@ class MainWindow(QMainWindow):
             self.ud.history_delete_and_insert(source, category_of(source), result, None, True)
             self.current = {'word': source, 'category': category_of(source), 'meaning': result, 'word_id': None}
             self._update_fav_button()
+
+    def load_resources_status_only(self):
+        self.status.setText('   |   '.join(['دیتابیس: ' + ('آماده' if self.db else 'انتخاب نشده'),
+                                            'مترجم: ' + (', '.join(x.replace('>', '→') for x in self.svc.available()) if self.svc and self.svc.available() else 'بسته‌ای پیدا نشد')]))
 
     # ----------------------------------------------------------------- لینک‌ها، صوت، علاقه‌مندی
     def on_anchor(self, url: QUrl):

@@ -10,30 +10,17 @@ from .nmt import OfflineNMT, T_MAX
 MAX_TRANSLATOR_WORDS = 500      # ConfigConstKt.MAX_TRANSLATOR_WORDS
 
 
-def _candidate_dirs(root: str) -> List[str]:
-    """ریشه + فرزندان + نوه‌ها؛ چیدمان ML Kit دو سطحی است: <root>/<pair>/translate_*/"""
-    if not os.path.isdir(root):
-        return []
-    out = [root]
-    for d in sorted(os.listdir(root)):
-        p = os.path.join(root, d)
-        if os.path.isdir(p):
-            out.append(p)
-            for e in sorted(os.listdir(p)):
-                p2 = os.path.join(p, e)
-                if os.path.isdir(p2):
-                    out.append(p2)
-    return out
-
-
 def discover_packages(root: str) -> Dict[str, str]:
-    """پوشه‌ی root و تا دو سطح زیرپوشه‌هایش را می‌گردد؛ هر پوشه‌ای که translation_model.pb دارد
-    یک بسته است. کلید خروجی مثل «fa>en» یا «en>de». (جهت از خود فایل translation_model.pb
-    خوانده می‌شود؛ هم چیدمان قدیمی root/translate_faen و هم چیدمان ML Kit
-    root/en_fa/translate_enfa شناسایی می‌شود.)"""
+    """پوشه‌ی root و زیرپوشه‌هایش را می‌گردد؛ هر پوشه‌ای که translation_model.pb دارد یک بسته است.
+    کلید خروجی مثل «fa>en». (جهت از خود فایل translation_model.pb خوانده می‌شود.)"""
     from .nmt import ModelSpec
     found = {}
-    for c in _candidate_dirs(root):
+    if os.path.isdir(root):
+        children = sorted(os.listdir(root), key=lambda name: (name in ('translate_faen', 'translate_enfa'), name))
+        cands = [root] + [os.path.join(root, d) for d in children]
+    else:
+        cands = []
+    for c in cands:
         if os.path.isfile(os.path.join(c, 'translation_model.pb')):
             try:
                 s = ModelSpec(c)
@@ -56,10 +43,9 @@ class OfflineTranslatorService:
     def available(self) -> List[str]:
         return sorted(self.packages)
 
-    def direction_for(self, text: str, target: str = 'fa') -> str:
-        # FDLanguageWord.getSourceAndDestLanguage، تعمیم‌یافته به هر زبان ML Kit:
-        # همهٔ مدل‌ها انگلیسی ⇄ زبان مقصد آموزش دیده‌اند؛ متن انگلیسی ⇒ en→X ؛ غیر این ⇒ X→en
-        return 'en>%s' % target if lang_of(text) == 'English' else '%s>en' % target
+    def direction_for(self, text: str) -> str:
+        # FDLanguageWord.getSourceAndDestLanguage: انگلیسی ⇒ en→fa ؛ غیر این ⇒ fa→en
+        return 'en>fa' if lang_of(text) == 'English' else 'fa>en'
 
     def _model(self, direction: str) -> OfflineNMT:
         if direction not in self.packages:
@@ -102,21 +88,13 @@ class OfflineTranslatorService:
             out.append(cur)
         return out
 
-    def translate(self, text: str, target: str = 'fa') -> Tuple[Optional[str], Optional[str], str]:
-        """→ (نتیجه, خطا, جهت). همان رفتار اندروید: ارقام نتیجه به زبان مقصد برگردانده می‌شود.
-
-        ``target`` زبان مقصد (مدل ML Kit) است؛ متن انگلیسی به همان زبان ترجمه می‌شود
-        و متن غیرانگلیسی به انگلیسی.
-        """
+    def translate(self, text: str) -> Tuple[Optional[str], Optional[str], str]:
+        """→ (نتیجه, خطا, جهت). همان رفتار اندروید: ارقام نتیجه به زبان مقصد برگردانده می‌شود."""
         text = text.strip()
-        direction = self.direction_for(text, target)
+        direction = self.direction_for(text)
         if direction not in self.packages:
-            from .mlkit_models import language_name, package_info
-            name = language_name(target)
-            size = package_info(lang=target)['DL_SZ']
-            return None, ('مدل ترجمهٔ آفلاین «%s» (%s) نصب نشده است؛ با دکمهٔ «مدل‌ها…» دانلودش کنید '
-                          '(حجم دانلود: %.1f مگابایت).'
-                          % (name, target, size / (1024.0 * 1024.0))), direction
+            return None, ('بسته‌ی ترجمه‌ی آفلاین «%s» نصب نشده است. از «دانلود/مدیریت مدل‌ها» استفاده کنید یا بسته‌ی translate_%s را در پوشه‌ی مدل‌ها بگذارید.'
+                          % (direction.replace('>', '→'), direction.replace('>', ''))), direction
         model = self._model(direction)
         lines_out = []
         for line in text.split('\n'):

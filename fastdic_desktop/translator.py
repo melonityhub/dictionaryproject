@@ -15,7 +15,11 @@ def discover_packages(root: str) -> Dict[str, str]:
     کلید خروجی مثل «fa>en». (جهت از خود فایل translation_model.pb خوانده می‌شود.)"""
     from .nmt import ModelSpec
     found = {}
-    cands = [root] + [os.path.join(root, d) for d in sorted(os.listdir(root))] if os.path.isdir(root) else []
+    if os.path.isdir(root):
+        children = sorted(os.listdir(root), key=lambda name: (name in ('translate_faen', 'translate_enfa'), name))
+        cands = [root] + [os.path.join(root, d) for d in children]
+    else:
+        cands = []
     for c in cands:
         if os.path.isfile(os.path.join(c, 'translation_model.pb')):
             try:
@@ -89,7 +93,7 @@ class OfflineTranslatorService:
         text = text.strip()
         direction = self.direction_for(text)
         if direction not in self.packages:
-            return None, ('بسته‌ی ترجمه‌ی آفلاین «%s» پیدا نشد. پوشه‌ی translate_%s را در مسیر مدل‌ها بگذارید.'
+            return None, ('بسته‌ی ترجمه‌ی آفلاین «%s» نصب نشده است. از «دانلود/مدیریت مدل‌ها» استفاده کنید یا بسته‌ی translate_%s را در پوشه‌ی مدل‌ها بگذارید.'
                           % (direction.replace('>', '→'), direction.replace('>', ''))), direction
         model = self._model(direction)
         lines_out = []

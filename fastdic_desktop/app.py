@@ -18,7 +18,8 @@ from . import htmlgen
 from .db import FDDatabase, category_of, lang_of, trim_lower, is_english, CAT_ENGLISH, CAT_PERSIAN
 from .numwords import en_words, fa_words, is_integer_text, to_int
 from .translator import OfflineTranslatorService, MAX_TRANSLATOR_WORDS
-from .userdata import Settings, UserData
+from .modelmanager import ModelManagerDialog
+from .userdata import Settings, UserData, default_models_dir
 
 try:
     from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -49,7 +50,7 @@ class SettingsDialog(QDialog):
         self.st = st
         f = QFormLayout(self)
         self.db = QLineEdit(st.get('db_path', ''))
-        self.models = QLineEdit(st.get('models_dir', ''))
+        self.models = QLineEdit(st.get('models_dir', '') or default_models_dir())
         for edit, is_dir in ((self.db, False), (self.models, True)):
             b = QPushButton('انتخاب…')
             b.clicked.connect(lambda _=False, e=edit, d=is_dir: self._pick(e, d))
@@ -113,7 +114,9 @@ class MainWindow(QMainWindow):
         self.tr_box = QWidget(); tv = QVBoxLayout(self.tr_box); tv.setContentsMargins(0, 0, 0, 0)
         self.tr_in = QPlainTextEdit(); self.tr_in.setPlaceholderText('متن را این‌جا بنویسید (حداکثر %d واژه)…' % MAX_TRANSLATOR_WORDS)
         self.tr_btn = QPushButton('ترجمه (Ctrl+Enter)')
-        tv.addWidget(self.tr_in, 1); tv.addWidget(self.tr_btn); lv.addWidget(self.tr_box, 1); self.tr_box.hide()
+        self.models_btn = QPushButton('دانلود/مدیریت مدل‌ها')
+        tr_actions = QHBoxLayout(); tr_actions.addWidget(self.tr_btn); tr_actions.addWidget(self.models_btn)
+        tv.addWidget(self.tr_in, 1); tv.addLayout(tr_actions); lv.addWidget(self.tr_box, 1); self.tr_box.hide()
         split.addWidget(left)
         self.view = QTextBrowser(); self.view.setOpenLinks(False); self.view.setOpenExternalLinks(False)
         split.addWidget(self.view)
@@ -132,6 +135,7 @@ class MainWindow(QMainWindow):
         self.btn_settings.clicked.connect(self.open_settings)
         self.btn_fav.clicked.connect(self.toggle_fav)
         self.tr_btn.clicked.connect(self.translate_box)
+        self.models_btn.clicked.connect(self.manage_models)
         QShortcut(QKeySequence('Ctrl+Return'), self, activated=self.translate_box)
         QShortcut(QKeySequence('Ctrl+L'), self, activated=lambda: (self.search.setFocus(), self.search.selectAll()))
 
@@ -153,8 +157,8 @@ class MainWindow(QMainWindow):
                 self.db = d if d.check() else None
             except Exception:
                 self.db = None
-        mroot = self.st.get('models_dir', '')
-        self.svc = OfflineTranslatorService(mroot, beam=int(self.st.get('beam', 4))) if mroot and os.path.isdir(mroot) else None
+        mroot = self.st.get('models_dir', '') or default_models_dir()
+        self.svc = OfflineTranslatorService(mroot, beam=int(self.st.get('beam', 4))) if os.path.isdir(mroot) else None
         msg = []
         msg.append('دیتابیس: ' + ('آماده' if self.db else 'انتخاب نشده'))
         msg.append('مترجم: ' + (', '.join(x.replace('>', '→') for x in self.svc.available()) if self.svc and self.svc.available() else 'بسته‌ای پیدا نشد'))
@@ -165,9 +169,18 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             dlg.apply(); self.load_resources(); self.refresh_list()
 
+    def manage_models(self):
+        models_root = self.st.get('models_dir', '') or default_models_dir()
+        dlg = ModelManagerDialog(self.st, models_root, self, on_models_changed=self.load_resources)
+        dlg.exec()
+        self.load_resources()
+        self.refresh_list()
+
     def show_welcome(self):
-        if not self.db or not self.svc:
-            body = htmlgen.not_found('از «⚙ تنظیمات» فایل دیتابیس و پوشه‌ی بسته‌های ترجمه را انتخاب کنید.', 'خوش آمدید')
+        if not self.db:
+            body = htmlgen.not_found('فایل دیتابیس را از «⚙ تنظیمات» انتخاب کنید.', 'خوش آمدید')
+        elif not self.svc or not self.svc.available():
+            body = htmlgen.not_found('برای ترجمه، از بخش «مترجم متن» دکمه‌ی «دانلود/مدیریت مدل‌ها» را بزنید و مدل فارسی↔انگلیسی را نصب کنید.', 'مدلی نصب نشده')
         else:
             body = htmlgen.not_found('یک لغت را جستجو کنید، یا روی ردیف «ترجمه» بزنید تا متن با مدل آفلاین ترجمه شود.', 'آماده است')
         self.view.setHtml(htmlgen.wrap(body, self.dark))

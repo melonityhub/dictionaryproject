@@ -280,9 +280,13 @@ def remove_language(lang: str, models_root: str) -> List[str]:
     removed = []
     for d in sorted(rec['remove_dirs']):
         p = Path(d).absolute()
-        # فقط پوشه‌های داخل ریشهٔ مدل‌ها مجاز به حذف‌اند
-        if root != p and root not in p.resolve().parents:
-            continue
+        pres = p.resolve()
+        if pres == root:
+            # ریشهٔ مدل‌ها فقط وقتی حذف می‌شود که خودش یک بستهٔ کامل باشد (چیدمان degenerate)
+            if not (root / 'translation_model.pb').is_file():
+                continue
+        elif root not in pres.parents:
+            continue          # فقط پوشه‌های داخل ریشهٔ مدل‌ها مجاز به حذف‌اند
         if p.is_dir() and not p.is_symlink():
             shutil.rmtree(p)
             removed.append(str(p))

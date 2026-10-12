@@ -4,7 +4,7 @@ ML Kit (dl.google.com) با نمایش پیشرفت و حجم DL_SZ، وضعیت
 و استفادهٔ بدون اینترنت از کش محلی در اجراهای بعدی."""
 import threading
 
-from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtCore import QSize, QThread, Signal, Qt
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel,
                                QMessageBox, QProgressBar, QPushButton, QStackedWidget,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)

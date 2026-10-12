@@ -1,9 +1,0 @@
-0BSD License
-
-Copyright (C) 2026 dictionaryproject contributors
-
-Permission to use, copy, modify, and/or distribute the original source code and documentation in this repository for any purpose, including personal and commercial purposes, with or without fee, is hereby granted.
-
-This permission applies only to materials for which the project contributors hold the applicable rights. It does not cover third-party content, including FastDic dictionary data and excerpts (for example, docs/sample.sqlite and docs/sample_report.md) or any Google ML Kit translation-model packages downloaded separately. Such third-party materials are not relicensed by this notice.
-
-THE PROJECT MATERIALS ARE PROVIDED "AS IS" AND THE AUTHORS DISCLAIM ALL WARRANTIES WITH REGARD TO THESE MATERIALS, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THESE MATERIALS.

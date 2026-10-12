@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from .bipe import load_bipe_file, build_tflite
+from .model_spec import ModelSpec, parse_pb
 from .textproc import (UnigramTokenizer, preprocess, detokenize_en, detokenize_fa)
 
 T_MAX = 72      # حداکثر طول منبع (شکل ثابت مدل)
@@ -71,59 +72,6 @@ class BipeModel:
             self.it.set_tensor(idx, np.ascontiguousarray(v, dtype=dt))
         self.it.invoke()
         return {k: self.it.get_tensor(i).copy() for k, i in self.out_idx.items()}
-
-
-# --- پارس دستی translation_model.pb / processor_spec.pb (protobuf wire format) ---
-
-def _varint(b, i):
-    r = s = 0
-    while True:
-        c = b[i]; i += 1
-        r |= (c & 0x7f) << s; s += 7
-        if not c & 0x80:
-            return r, i
-
-
-def parse_pb(b: bytes) -> List[tuple]:
-    """فهرست (field, wiretype, value) — بازگشتی برای پیام‌های تو در تو (اگر معتبر باشند)."""
-    i = 0; out = []
-    while i < len(b):
-        k, i = _varint(b, i)
-        f, w = k >> 3, k & 7
-        if w == 0:
-            v, i = _varint(b, i)
-        elif w == 1:
-            v = b[i:i + 8]; i += 8
-        elif w == 5:
-            v = b[i:i + 4]; i += 4
-        elif w == 2:
-            l, i = _varint(b, i); v = b[i:i + l]; i += l
-        else:
-            raise ValueError('wire type')
-        out.append((f, w, v))
-    return out
-
-
-class ModelSpec:
-    """محتوای translation_model.pb: زبان‌ها، مسیر vocab ها و فایل‌های مدل."""
-
-    def __init__(self, folder: str):
-        raw = open(os.path.join(folder, 'translation_model.pb'), 'rb').read()
-        top = parse_pb(raw)
-        self.src_lang = next(v for f, w, v in top if f == 1).decode()
-        self.tgt_lang = next(v for f, w, v in top if f == 2).decode()
-        self.files: Dict[str, str] = {}
-        for f, w, v in top:
-            if f == 5:
-                m = {ff: vv for ff, ww, vv in parse_pb(v)}
-                self.files[m[1].decode()] = m[2].decode()
-        f4 = parse_pb(next(v for f, w, v in top if f == 4))
-        src = parse_pb(next(v for f, w, v in f4 if f == 1))
-        tgt = parse_pb(next(v for f, w, v in f4 if f == 6))
-        self.src_model = next(v for f, w, v in src if f == 1).decode()
-        self.src_vocab = next(v for f, w, v in src if f == 2).decode()
-        self.tgt_model = next(v for f, w, v in tgt if f == 1).decode()
-        self.tgt_vocab = next(v for f, w, v in tgt if f == 2).decode()
 
 
 class OfflineNMT:

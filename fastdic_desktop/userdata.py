@@ -16,6 +16,11 @@ def app_dir() -> str:
     return d
 
 
+def default_models_dir() -> str:
+    """Writable default location for model bundles downloaded by the app."""
+    return os.path.join(app_dir(), 'models')
+
+
 class Settings:
     def __init__(self, path=None):
         self.path = path or os.path.join(app_dir(), 'settings.json')
